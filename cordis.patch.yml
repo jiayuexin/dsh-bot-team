@@ -1,0 +1,6 @@
+# Bot Team: persistent named Bots. Bot sessions use the shipped `standard`
+# preset; identity, memory and Bot tools are registered globally by this row.
+- insert:
+    - id: dsh-bot-team
+      name: dsh-bot-team
+      config: {}
