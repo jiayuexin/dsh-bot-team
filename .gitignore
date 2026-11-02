@@ -1,3 +1,4 @@
 node_modules/
 .dev/home/
 .dev/logs/
+.dev/mcp-items.json
