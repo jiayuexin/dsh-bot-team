@@ -74,6 +74,9 @@ test('invalid files are refused before anything is stored', async (t) => {
   await writeFile(join(workspace, 'big.zip'), '')
   await truncate(join(workspace, 'big.zip'), MAX_FILE_BYTES + 1)
   await assert.rejects(toContentBlocks([{ path: 'big.zip' }], { attachments, workspace }), { code: 'file_too_large' })
+  await writeFile(join(workspace, 'big.png'), '')
+  await truncate(join(workspace, 'big.png'), MAX_FILE_BYTES + 1)
+  await assert.rejects(toContentBlocks([{ path: 'big.png' }], { attachments, workspace }), { code: 'file_too_large' })
   assert.equal(attachments.saved.length, 0)
 })
 
