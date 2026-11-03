@@ -1,8 +1,15 @@
 {
-  "name": "dsh-bot-team",
+  "name": "@lingyun_jaya/dsh-bot-team",
   "version": "0.1.0",
-  "private": true,
   "description": "Persistent Bot teammates for DeepSeek Harness: named Bots with their own conversation, memory, routines, skills, handoffs and group chats.",
+  "license": "Apache-2.0",
+  "keywords": [
+    "dsh",
+    "deepseek-harness",
+    "dsh-plugin",
+    "bot",
+    "agent-team"
+  ],
   "type": "module",
   "exports": {
     ".": "./lib/index.js",
@@ -46,5 +53,9 @@
   },
   "scripts": {
     "test": "sh test/run.sh"
+  },
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org/"
   }
 }

@@ -2,5 +2,5 @@
 # preset; identity, memory and Bot tools are registered globally by this row.
 - insert:
     - id: dsh-bot-team
-      name: dsh-bot-team
+      name: "@lingyun_jaya/dsh-bot-team"
       config: {}
