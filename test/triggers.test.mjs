@@ -65,6 +65,7 @@ test('the first poll only records existing items; later polls deliver new matchi
   assert.equal(deliveries[0].sessionId, bot.sessionId)
   assert.match(deliveries[0].text, /needs repro new/)
   assert.equal(deliveries[0].source.role, 'handoff')
+  assert.equal(deliveries[0].mode, 'followup')
   assert.deepEqual(await triggers.run(trigger.id), { ok: true, primed: false, fresh: 0, delivered: 0 })
   assert.equal(deliveries.length, 1)
   assert.deepEqual(executed[0], { all: false })

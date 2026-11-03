@@ -25,52 +25,106 @@ function userMessage(text) {
   return createUserMessage({ content: [{ type: 'text', text }], source: { kind: 'user' } })
 }
 
-test('a handoff is recorded, delivered with structured source, and its reply routes back', async (t) => {
+test('a new task is recorded and queued; its final reply steers back and closes it', async (t) => {
   const { alan, res, deliveries, handoffs, registry } = await setup(t)
-  const handoff = await handoffs.dispatch({ kind: 'message', fromSessionId: alan.sessionId, toBot: res, text: '查一下许可证', hop: 1 })
+  const { handoff, followUp } = await handoffs.send({ kind: 'message', fromSessionId: alan.sessionId, toBot: res, text: '查一下许可证' })
+  assert.equal(followUp, false)
   assert.equal(deliveries[0].sessionId, res.sessionId)
+  assert.equal(deliveries[0].mode, 'followup')
   assert.deepEqual({ ...deliveries[0].source, summary: undefined }, { kind: 'bot-team', form: 'notice', summary: undefined, role: 'handoff', handoffId: handoff.id, fromBotId: alan.id, hop: 1 })
   assert.match(deliveries[0].text, new RegExp(handoff.id))
 
-  await handoffs.reply({ handoffId: handoff.id, callerSessionId: res.sessionId, text: 'MIT' })
+  handoffs.observeStep(res.sessionId, [createUserMessage({ content: deliveries[0].content, source: deliveries[0].source })])
+  const result = await handoffs.reply({ handoffId: handoff.id, callerSessionId: res.sessionId, text: 'MIT', done: true })
+  assert.deepEqual(result, { handoffId: handoff.id, deliveredTo: '阿岚', done: true, files: 0 })
   assert.equal(deliveries[1].sessionId, alan.sessionId)
+  assert.equal(deliveries[1].mode, 'steer')
   assert.equal(deliveries[1].source.role, 'reply')
   assert.equal(deliveries[1].source.hop, 2)
   assert.equal(registry.handoff(handoff.id).status, 'replied')
 })
 
-test('only the target Bot may reply, and event handoffs have no reply target', async (t) => {
-  const { alan, res, writer, handoffs } = await setup(t)
-  const handoff = await handoffs.dispatch({ kind: 'message', fromSessionId: alan.sessionId, toBot: res, text: 'x', hop: 1 })
-  await assert.rejects(handoffs.reply({ handoffId: handoff.id, callerSessionId: writer.sessionId, text: 'y' }), { code: 'not_handoff_target' })
-  const event = await handoffs.dispatch({ kind: 'event', fromSessionId: null, toBot: res, text: 'new issue', hop: 1 })
-  await assert.rejects(handoffs.reply({ handoffId: event.id, callerSessionId: res.sessionId, text: 'done' }), { code: 'no_reply_target' })
-  await assert.rejects(handoffs.reply({ handoffId: 'handoff-ffffffff', callerSessionId: res.sessionId, text: 'x' }), { code: 'handoff_not_found' })
+test('a second message on an unfinished handoff is a steered follow-up on the same handoff', async (t) => {
+  const { alan, res, deliveries, handoffs, registry } = await setup(t)
+  const first = await handoffs.send({ kind: 'message', fromSessionId: alan.sessionId, toBot: res, text: '做个报表', contextSessionId: 's-ctx' })
+  const second = await handoffs.send({ kind: 'message', fromSessionId: alan.sessionId, toBot: res, text: '好了没？', contextSessionId: 's-ctx' })
+  assert.equal(second.followUp, true)
+  assert.equal(second.handoff.id, first.handoff.id)
+  assert.equal(registry.state.handoffs.handoffs.length, 1)
+  assert.equal(deliveries[1].mode, 'steer')
+  assert.equal(deliveries[1].source.role, 'follow-up')
+  assert.equal(deliveries[1].source.handoffId, first.handoff.id)
+  assert.equal(deliveries[1].source.contextSessionId, undefined)
+  assert.match(deliveries[1].text, /【跟进 handoff-[0-9a-f]{8}】来自阿岚[\s\S]*好了没？[\s\S]*done: false/)
 })
 
-test('self handoffs and hops beyond the limit are refused', async (t) => {
-  const { alan, res, handoffs } = await setup(t)
-  await assert.rejects(handoffs.dispatch({ kind: 'message', fromSessionId: alan.sessionId, toBot: alan, text: 'x', hop: 1 }), { code: 'self_handoff' })
-  await assert.rejects(handoffs.dispatch({ kind: 'message', fromSessionId: alan.sessionId, toBot: res, text: 'x', hop: MAX_HOPS + 1 }), { code: 'handoff_hop_limit' })
+test('progress keeps the handoff open for follow-ups; only done: true closes it', async (t) => {
+  const { alan, res, deliveries, handoffs, registry } = await setup(t)
+  const { handoff } = await handoffs.send({ kind: 'message', fromSessionId: alan.sessionId, toBot: res, text: '任务' })
+  await handoffs.reply({ handoffId: handoff.id, callerSessionId: res.sessionId, text: '做到一半', done: false })
+  assert.equal(registry.handoff(handoff.id).status, 'open')
+  assert.equal(deliveries[1].source.done, false)
+  assert.equal((await handoffs.send({ kind: 'message', fromSessionId: alan.sessionId, toBot: res, text: '加急' })).followUp, true)
+  await handoffs.reply({ handoffId: handoff.id, callerSessionId: res.sessionId, text: '完成', done: true })
+  assert.equal(registry.handoff(handoff.id).status, 'replied')
+  const next = await handoffs.send({ kind: 'message', fromSessionId: alan.sessionId, toBot: res, text: '新任务' })
+  assert.equal(next.followUp, false)
+  assert.notEqual(next.handoff.id, handoff.id)
+  await assert.rejects(handoffs.reply({ handoffId: handoff.id, callerSessionId: res.sessionId, text: 'x', done: 'yes' }), { code: 'invalid_done' })
 })
 
-test('a ping-pong chain stops at the hop limit', async (t) => {
+test('a group coordinator nudging a member through bot_message follows up', async (t) => {
+  const { registry, res, writer, handoffs, deliveries } = await setup(t)
+  const group = await registry.createGroup({ name: 'G', members: [res.id, writer.id], sessionId: 's-group' })
+  await handoffs.send({ kind: 'message', fromSessionId: group.sessionId, toBot: res, text: '查资料' })
+  const nudge = await handoffs.send({ kind: 'message', fromSessionId: group.sessionId, toBot: res, text: '用户在催' })
+  assert.equal(nudge.followUp, true)
+  assert.match(deliveries[1].text, /来自群聊「G」/)
+  assert.equal((await handoffs.send({ kind: 'message', fromSessionId: group.sessionId, toBot: writer, text: '写稿' })).followUp, false)
+})
+
+test('events always open new handoffs and have no reply target', async (t) => {
+  const { alan, res, writer, handoffs, deliveries } = await setup(t)
+  const first = await handoffs.send({ kind: 'event', fromSessionId: null, toBot: res, text: 'issue 1' })
+  const second = await handoffs.send({ kind: 'event', fromSessionId: null, toBot: res, text: 'issue 2' })
+  assert.equal(second.followUp, false)
+  assert.notEqual(first.handoff.id, second.handoff.id)
+  assert.deepEqual(deliveries.map((d) => [d.mode, d.source.hop]), [['followup', 1], ['followup', 1]])
+  await assert.rejects(handoffs.reply({ handoffId: first.handoff.id, callerSessionId: res.sessionId, text: 'done', done: true }), { code: 'no_reply_target' })
+  const { handoff } = await handoffs.send({ kind: 'message', fromSessionId: alan.sessionId, toBot: res, text: 'x' })
+  await assert.rejects(handoffs.reply({ handoffId: handoff.id, callerSessionId: writer.sessionId, text: 'y', done: true }), { code: 'not_handoff_target' })
+  await assert.rejects(handoffs.reply({ handoffId: 'handoff-ffffffff', callerSessionId: res.sessionId, text: 'x', done: true }), { code: 'handoff_not_found' })
+})
+
+test('self handoffs, sends and replies beyond the hop limit are refused', async (t) => {
+  const { alan, res, handoffs, deliveries } = await setup(t)
+  await assert.rejects(handoffs.send({ kind: 'message', fromSessionId: alan.sessionId, toBot: alan, text: 'x' }), { code: 'self_handoff' })
+  const { handoff } = await handoffs.send({ kind: 'message', fromSessionId: alan.sessionId, toBot: res, text: 'x' })
+  handoffs.observeStep(alan.sessionId, [createUserMessage({ content: [{ type: 'text', text: 'x' }], source: botSource('x', { hop: MAX_HOPS }) })])
+  await assert.rejects(handoffs.send({ kind: 'message', fromSessionId: alan.sessionId, toBot: res, text: 'x' }), { code: 'handoff_hop_limit' })
+  handoffs.observeStep(res.sessionId, [createUserMessage({ content: [{ type: 'text', text: 'x' }], source: botSource('x', { hop: MAX_HOPS }) })])
+  await assert.rejects(handoffs.reply({ handoffId: handoff.id, callerSessionId: res.sessionId, text: 'r', done: false }), { code: 'handoff_hop_limit' })
+  assert.equal(deliveries.length, 1)
+})
+
+test('a ping-pong chain stops at the hop limit even when it turns into follow-ups', async (t) => {
   const { alan, res, handoffs, deliveries } = await setup(t)
   const bots = [alan, res]
   let error
   for (let step = 0; step < 10 && error === undefined; step++) {
     const from = bots[step % 2]
     const to = bots[(step + 1) % 2]
-    const inbound = deliveries.filter((d) => d.sessionId === from.sessionId).map((d) => createUserMessage({ content: [{ type: 'text', text: d.text }], source: d.source }))
+    const inbound = deliveries.filter((d) => d.sessionId === from.sessionId).map((d) => createUserMessage({ content: d.content, source: d.source }))
     handoffs.observeStep(from.sessionId, inbound.slice(-1))
     try {
-      await handoffs.dispatch({ kind: 'message', fromSessionId: from.sessionId, toBot: to, text: `ping ${step}`, hop: handoffs.currentHop(from.sessionId) + 1 })
+      await handoffs.send({ kind: 'message', fromSessionId: from.sessionId, toBot: to, text: `ping ${step}` })
     } catch (caught) {
       error = caught
     }
   }
   assert.equal(error?.code, 'handoff_hop_limit')
   assert.equal(deliveries.length, MAX_HOPS)
+  assert.ok(deliveries.some((d) => d.source.role === 'follow-up'))
 })
 
 test('a direct user message resets the hop count', async (t) => {
@@ -100,6 +154,16 @@ test('an @Bot in an ordinary conversation hands off with context and appends one
   assert.equal(deliveries[0].sessionId, res.sessionId)
   assert.equal(deliveries[0].source.contextSessionId, 's-normal')
   assert.match(deliveries[0].text, /@研究员 查一下这个库的许可证/)
+})
+
+test('a second @Bot while its handoff is unfinished is relayed as a follow-up', async (t) => {
+  const { res, mentions, deliveries } = await setup(t)
+  await mentions.process(fakeAgent('s-group-like'), [userMessage(`${formatMention(res)} 做个调研`)])
+  const out = await mentions.process(fakeAgent('s-group-like'), [userMessage(`${formatMention(res)} 进度怎么样了`)])
+  assert.match(out[1].content[0].text, /已把这条催促或补充转达给 @研究员/)
+  assert.equal(deliveries[1].mode, 'steer')
+  assert.equal(deliveries[1].source.role, 'follow-up')
+  assert.equal(deliveries[1].source.contextSessionId, undefined)
 })
 
 test('plugin-delivered messages are never parsed for mentions', async (t) => {
@@ -152,6 +216,9 @@ test('identity text is injected only for Bot and group Sessions', async (t) => {
   assert.match(alanText, /你是「阿岚」，岗位：对账专员/)
   assert.match(alanText, /报表一律用 CSV/)
   assert.match(alanText, /研究员/)
+  assert.match(alanText, /done: false/)
+  assert.match(alanText, /【跟进】/)
+  assert.match(alanText, /files/)
   assert.equal(section.text({ agent: fakeAgent('s-normal') }), '')
   assert.equal(section.text({}), '')
   const group = await registry.createGroup({ name: 'G', members: [alan.id, res.id], sessionId: 's-group' })

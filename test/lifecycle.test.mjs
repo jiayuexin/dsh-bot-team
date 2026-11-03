@@ -50,6 +50,7 @@ test('creating a Bot registers the shared workspace once, opens a standard Sessi
   assert.deepEqual(calls.presets[0], [bot.sessionId, BOT_PERMISSION])
   assert.equal(deliveries[0].sessionId, bot.sessionId)
   assert.equal(deliveries[0].source.role, 'kickoff')
+  assert.equal(deliveries[0].mode, 'followup')
   assert.match(deliveries[0].text, /自我介绍/)
   assert.equal(registry.bot(bot.id).createdBy, 'user')
 })

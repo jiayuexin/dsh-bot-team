@@ -59,7 +59,12 @@ test('bot_message resolves names, refuses unknown targets and delivers', async (
   assert.equal((await call('bot_message', { to: 'Nobody', text: 'x' }, fakeAgent('s-a'))).code, 'bot_not_found')
   const result = await call('bot_message', { to: 'b', text: '帮我查一下' }, fakeAgent('s-a'))
   assert.equal(result.status, 'delivered')
+  assert.equal(result.followUp, false)
   assert.equal(deliveries[0].sessionId, b.sessionId)
+  const nudge = await call('bot_message', { to: 'B', text: '好了吗' }, fakeAgent('s-a'))
+  assert.equal(nudge.followUp, true)
+  assert.equal(nudge.handoffId, result.handoffId)
+  assert.equal(deliveries[1].mode, 'steer')
   assert.equal((await call('bot_message', { to: 'A', text: 'x' }, fakeAgent('s-a'))).code, 'self_handoff')
 })
 

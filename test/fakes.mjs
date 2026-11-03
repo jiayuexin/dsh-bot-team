@@ -4,6 +4,7 @@ import { join } from 'node:path'
 import { botTeamPaths } from '../lib/paths.js'
 import { Registry } from '../lib/registry.js'
 import { MemoryStore } from '../lib/memory.js'
+import { DELIVERY_MODES } from '../lib/deliver.js'
 
 export async function tempPaths(t) {
   const home = await mkdtemp(join(tmpdir(), 'bot-team-test-'))
@@ -28,11 +29,13 @@ export function fakeAgent(sessionId, { delegationDepth = 0 } = {}) {
   return { id: sessionId, options: {}, session: { id: sessionId, header: { delegationDepth, cwd: '/tmp' } } }
 }
 
-/** Records every delivery instead of resuming a real Session. */
+/** Records every delivery instead of resuming a real Session; `text` joins the text blocks. */
 export function recordingDeliver() {
   const deliveries = []
-  const deliver = async (sessionId, text, source) => {
-    deliveries.push({ sessionId, text, source })
+  const deliver = async (sessionId, content, source, mode) => {
+    if (!DELIVERY_MODES.includes(mode)) throw new TypeError(`bad delivery mode ${String(mode)}`)
+    const text = content.filter((block) => block.type === 'text').map((block) => block.text).join('\n')
+    deliveries.push({ sessionId, content, text, source, mode })
     return `message-${deliveries.length}`
   }
   return { deliver, deliveries }
