@@ -1,7 +1,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
-import { Handoffs, MAX_HOPS } from '../lib/handoff.js'
+import { Handoffs, DEFAULT_MAX_HOPS, resolveMaxHops } from '../lib/handoff.js'
 import { Mentions, formatMention, parseMentions } from '../lib/mention.js'
 import { registerIdentity, IDENTITY_SECTION } from '../lib/identity.js'
 import { botSource } from '../lib/deliver.js'
@@ -9,14 +9,14 @@ import { tempPaths, loadedRegistry, loadedMemory, fakeAgent, recordingDeliver, s
 
 const avatar = { shape: 'circle', color: '#112233' }
 
-async function setup(t) {
+async function setup(t, options = {}) {
   const paths = await tempPaths(t)
   const registry = await loadedRegistry(paths)
   const alan = await registry.createBot({ name: '阿岚', title: '对账专员', avatar, sessionId: 's-alan' })
   const res = await registry.createBot({ name: '研究员', avatar, sessionId: 's-res' })
   const writer = await registry.createBot({ name: '写手', avatar, sessionId: 's-writer' })
   const { deliver, deliveries } = recordingDeliver()
-  const handoffs = new Handoffs({ registry, deliver, logger: silentLogger })
+  const handoffs = new Handoffs({ registry, deliver, logger: silentLogger, ...options })
   const mentions = new Mentions({ registry, handoffs })
   return { paths, registry, alan, res, writer, deliveries, handoffs, mentions }
 }
@@ -64,13 +64,63 @@ test('progress keeps the handoff open for follow-ups; only done: true closes it'
   await handoffs.reply({ handoffId: handoff.id, callerSessionId: res.sessionId, text: '做到一半', done: false })
   assert.equal(registry.handoff(handoff.id).status, 'open')
   assert.equal(deliveries[1].source.done, false)
+  assert.equal(deliveries[1].mode, 'inject')
   assert.equal((await handoffs.send({ kind: 'message', fromSessionId: alan.sessionId, toBot: res, text: '加急' })).followUp, true)
   await handoffs.reply({ handoffId: handoff.id, callerSessionId: res.sessionId, text: '完成', done: true })
   assert.equal(registry.handoff(handoff.id).status, 'replied')
+  assert.equal(deliveries[3].mode, 'steer')
+  assert.equal(handoffs.asked.has(handoff.id), false)
   const next = await handoffs.send({ kind: 'message', fromSessionId: alan.sessionId, toBot: res, text: '新任务' })
   assert.equal(next.followUp, false)
   assert.notEqual(next.handoff.id, handoff.id)
   await assert.rejects(handoffs.reply({ handoffId: handoff.id, callerSessionId: res.sessionId, text: 'x', done: 'yes' }), { code: 'invalid_done' })
+})
+
+test('plain progress is injected; the answer to a follow-up and a blocker wake the origin', async (t) => {
+  const { alan, res, deliveries, handoffs } = await setup(t)
+  const { handoff } = await handoffs.send({ kind: 'message', fromSessionId: alan.sessionId, toBot: res, text: '任务' })
+  const replyModes = () => deliveries.filter((d) => d.source.role === 'reply').map((d) => d.mode)
+
+  await handoffs.reply({ handoffId: handoff.id, callerSessionId: res.sessionId, text: '做到一半', done: false })
+  await handoffs.send({ kind: 'message', fromSessionId: alan.sessionId, toBot: res, text: '好了没？' })
+  await handoffs.reply({ handoffId: handoff.id, callerSessionId: res.sessionId, text: '还差一步', done: false })
+  await handoffs.reply({ handoffId: handoff.id, callerSessionId: res.sessionId, text: '继续推进', done: false })
+  await handoffs.reply({ handoffId: handoff.id, callerSessionId: res.sessionId, text: '要不要覆盖旧文件？', done: false, blocked: true })
+  assert.deepEqual(replyModes(), ['inject', 'steer', 'inject', 'steer'])
+
+  const blocker = deliveries.at(-1)
+  assert.equal(blocker.source.blocked, true)
+  assert.match(blocker.text, /【回复 handoff-[0-9a-f]{8}·阻塞】研究员/)
+  assert.match(blocker.source.summary, /^研究员 阻塞：/)
+  assert.equal(deliveries.find((d) => d.text.includes('做到一半')).source.blocked, undefined)
+
+  await assert.rejects(handoffs.reply({ handoffId: handoff.id, callerSessionId: res.sessionId, text: 'x', done: false, blocked: 'yes' }), { code: 'invalid_blocked' })
+  await assert.rejects(handoffs.reply({ handoffId: handoff.id, callerSessionId: res.sessionId, text: 'x', done: true, blocked: true }), { code: 'invalid_blocked' })
+})
+
+test('a follow-up stays pending until its answer is actually delivered', async (t) => {
+  const { alan, res, registry } = await setup(t)
+  const { deliver, deliveries } = recordingDeliver()
+  let failNext = false
+  const flaky = async (...args) => {
+    if (failNext) { failNext = false; throw new Error('session unavailable') }
+    return deliver(...args)
+  }
+  const handoffs = new Handoffs({ registry, deliver: flaky, logger: silentLogger })
+  const { handoff } = await handoffs.send({ kind: 'message', fromSessionId: alan.sessionId, toBot: res, text: '任务' })
+  await handoffs.send({ kind: 'message', fromSessionId: alan.sessionId, toBot: res, text: '好了没？' })
+  failNext = true
+  await assert.rejects(handoffs.reply({ handoffId: handoff.id, callerSessionId: res.sessionId, text: '还差一步', done: false }), /session unavailable/)
+  assert.equal(handoffs.asked.has(handoff.id), true)
+  await handoffs.reply({ handoffId: handoff.id, callerSessionId: res.sessionId, text: '还差一步', done: false })
+  assert.equal(deliveries.at(-1).mode, 'steer')
+  assert.equal(handoffs.asked.has(handoff.id), false)
+})
+
+test('a new handoff asks for the final delivery and a blocker instead of routine progress', async (t) => {
+  const { alan, res, deliveries, handoffs } = await setup(t)
+  await handoffs.send({ kind: 'message', fromSessionId: alan.sessionId, toBot: res, text: '任务' })
+  assert.match(deliveries[0].text, /done: true）交付[\s\S]*blocked: true[\s\S]*其余进度不必回报/)
 })
 
 test('a group coordinator nudging a member through bot_message follows up', async (t) => {
@@ -100,9 +150,9 @@ test('self handoffs, sends and replies beyond the hop limit are refused', async 
   const { alan, res, handoffs, deliveries } = await setup(t)
   await assert.rejects(handoffs.send({ kind: 'message', fromSessionId: alan.sessionId, toBot: alan, text: 'x' }), { code: 'self_handoff' })
   const { handoff } = await handoffs.send({ kind: 'message', fromSessionId: alan.sessionId, toBot: res, text: 'x' })
-  handoffs.observeStep(alan.sessionId, [createUserMessage({ content: [{ type: 'text', text: 'x' }], source: botSource('x', { hop: MAX_HOPS }) })])
+  handoffs.observeStep(alan.sessionId, [createUserMessage({ content: [{ type: 'text', text: 'x' }], source: botSource('x', { hop: DEFAULT_MAX_HOPS }) })])
   await assert.rejects(handoffs.send({ kind: 'message', fromSessionId: alan.sessionId, toBot: res, text: 'x' }), { code: 'handoff_hop_limit' })
-  handoffs.observeStep(res.sessionId, [createUserMessage({ content: [{ type: 'text', text: 'x' }], source: botSource('x', { hop: MAX_HOPS }) })])
+  handoffs.observeStep(res.sessionId, [createUserMessage({ content: [{ type: 'text', text: 'x' }], source: botSource('x', { hop: DEFAULT_MAX_HOPS }) })])
   await assert.rejects(handoffs.reply({ handoffId: handoff.id, callerSessionId: res.sessionId, text: 'r', done: false }), { code: 'handoff_hop_limit' })
   assert.equal(deliveries.length, 1)
 })
@@ -111,7 +161,7 @@ test('a ping-pong chain stops at the hop limit even when it turns into follow-up
   const { alan, res, handoffs, deliveries } = await setup(t)
   const bots = [alan, res]
   let error
-  for (let step = 0; step < 10 && error === undefined; step++) {
+  for (let step = 0; step < DEFAULT_MAX_HOPS + 4 && error === undefined; step++) {
     const from = bots[step % 2]
     const to = bots[(step + 1) % 2]
     const inbound = deliveries.filter((d) => d.sessionId === from.sessionId).map((d) => createUserMessage({ content: d.content, source: d.source }))
@@ -123,8 +173,53 @@ test('a ping-pong chain stops at the hop limit even when it turns into follow-up
     }
   }
   assert.equal(error?.code, 'handoff_hop_limit')
-  assert.equal(deliveries.length, MAX_HOPS)
+  assert.equal(deliveries.length, DEFAULT_MAX_HOPS)
   assert.ok(deliveries.some((d) => d.source.role === 'follow-up'))
+})
+
+test('a configured maxHops replaces the default limit', async (t) => {
+  const { alan, res, handoffs, deliveries } = await setup(t, { maxHops: 3 })
+  handoffs.observeStep(alan.sessionId, [createUserMessage({ content: [{ type: 'text', text: 'x' }], source: botSource('x', { hop: 2 }) })])
+  await handoffs.send({ kind: 'message', fromSessionId: alan.sessionId, toBot: res, text: 'third hop' })
+  assert.equal(deliveries[0].source.hop, 3)
+  handoffs.observeStep(alan.sessionId, [createUserMessage({ content: [{ type: 'text', text: 'x' }], source: botSource('x', { hop: 3 }) })])
+  await assert.rejects(handoffs.send({ kind: 'message', fromSessionId: alan.sessionId, toBot: res, text: 'fourth hop' }), { code: 'handoff_hop_limit', message: /limit of 3 hops/ })
+})
+
+test('resolveMaxHops defaults when absent and rejects anything but an integer >= 1', () => {
+  assert.equal(resolveMaxHops({}), DEFAULT_MAX_HOPS)
+  assert.equal(resolveMaxHops(undefined), DEFAULT_MAX_HOPS)
+  assert.equal(resolveMaxHops({ maxHops: 30 }), 30)
+  for (const maxHops of [0, -1, 2.5, '10', null]) {
+    assert.throws(() => resolveMaxHops({ maxHops }), TypeError)
+  }
+})
+
+test('members discuss several rounds with each other and both still reply to the dispatcher', async (t) => {
+  const { alan, res, writer, handoffs, deliveries } = await setup(t)
+  const observeLatest = (bot) => {
+    const inbound = deliveries.filter((d) => d.sessionId === bot.sessionId).at(-1)
+    handoffs.observeStep(bot.sessionId, [createUserMessage({ content: inbound.content, source: inbound.source })])
+  }
+  const toRes = await handoffs.send({ kind: 'message', fromSessionId: alan.sessionId, toBot: res, text: '调研' })
+  const toWriter = await handoffs.send({ kind: 'message', fromSessionId: alan.sessionId, toBot: writer, text: '起草' })
+  observeLatest(res)
+  const resToWriter = await handoffs.send({ kind: 'message', fromSessionId: res.sessionId, toBot: writer, text: '这是资料' })
+  for (let round = 0; round < 3; round++) {
+    observeLatest(writer)
+    await handoffs.reply({ handoffId: resToWriter.handoff.id, callerSessionId: writer.sessionId, text: `问题 ${round}`, done: false })
+    observeLatest(res)
+    assert.equal((await handoffs.send({ kind: 'message', fromSessionId: res.sessionId, toBot: writer, text: `回答 ${round}` })).followUp, true)
+  }
+  observeLatest(writer)
+  await handoffs.reply({ handoffId: resToWriter.handoff.id, callerSessionId: writer.sessionId, text: '收到', done: true })
+  observeLatest(res)
+  await handoffs.reply({ handoffId: toRes.handoff.id, callerSessionId: res.sessionId, text: '调研完成', done: true })
+  observeLatest(writer)
+  await handoffs.reply({ handoffId: toWriter.handoff.id, callerSessionId: writer.sessionId, text: '初稿完成', done: true })
+  const toAlan = deliveries.filter((d) => d.sessionId === alan.sessionId)
+  assert.deepEqual(toAlan.map((d) => [d.source.handoffId, d.source.done]), [[toRes.handoff.id, true], [toWriter.handoff.id, true]])
+  assert.ok(deliveries.every((d) => d.source.hop <= DEFAULT_MAX_HOPS))
 })
 
 test('a direct user message resets the hop count', async (t) => {
@@ -133,6 +228,15 @@ test('a direct user message resets the hop count', async (t) => {
   assert.equal(handoffs.currentHop(alan.sessionId), 4)
   handoffs.observeStep(alan.sessionId, [userMessage('new task')])
   assert.equal(handoffs.currentHop(alan.sessionId), 0)
+})
+
+test('a direct user message resets the hop count even beside injected progress in the same step', async (t) => {
+  const { alan, handoffs } = await setup(t)
+  const progress = createUserMessage({ content: [{ type: 'text', text: 'p' }], source: botSource('p', { role: 'reply', hop: 15 }) })
+  handoffs.observeStep(alan.sessionId, [progress, userMessage('现在什么情况？')])
+  assert.equal(handoffs.currentHop(alan.sessionId), 0)
+  handoffs.observeStep(alan.sessionId, [progress])
+  assert.equal(handoffs.currentHop(alan.sessionId), 15)
 })
 
 test('mentions parse names with escaped brackets and keep first-appearance order', () => {

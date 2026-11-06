@@ -1,6 +1,6 @@
 {
   "name": "@lingyun_jaya/dsh-bot-team",
-  "version": "0.1.1",
+  "version": "0.1.3",
   "description": "Persistent Bot teammates for DeepSeek Harness: named Bots with their own conversation, memory, routines, skills, handoffs and group chats.",
   "license": "Apache-2.0",
   "keywords": [

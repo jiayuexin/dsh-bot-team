@@ -68,6 +68,14 @@ test('bot_message resolves names, refuses unknown targets and delivers', async (
   assert.equal((await call('bot_message', { to: 'A', text: 'x' }, fakeAgent('s-a'))).code, 'self_handoff')
 })
 
+test('bot_reply passes blocked through and defaults to plain progress', async (t) => {
+  const { call, deliveries } = await setup(t)
+  const { handoffId } = await call('bot_message', { to: 'B', text: '做个报表' }, fakeAgent('s-a'))
+  await call('bot_reply', { handoff_id: handoffId, text: '做到一半', done: false }, fakeAgent('s-b'))
+  await call('bot_reply', { handoff_id: handoffId, text: '用哪个模板？', done: false, blocked: true }, fakeAgent('s-b'))
+  assert.deepEqual(deliveries.slice(1).map((d) => [d.mode, d.source.blocked]), [['inject', undefined], ['steer', true]])
+})
+
 test('a Bot only manages its own triggers', async (t) => {
   const { call, registry, a } = await setup(t)
   const created = await call('bot_trigger_create', { title: 't', server: 'github', tool: 'n', id_path: 'id', prompt: 'p', interval_seconds: 120 }, fakeAgent('s-a'))

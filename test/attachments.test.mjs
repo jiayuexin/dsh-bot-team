@@ -123,6 +123,7 @@ test('bot_reply requires done and accepts a typed files list', async (t) => {
   const schema = tools.get('bot_reply').parameters
   assert.deepEqual(schema.required, ['handoff_id', 'text', 'done'])
   assert.equal(schema.properties.done.type, 'boolean')
+  assert.equal(schema.properties.blocked.type, 'boolean')
   assert.deepEqual(schema.properties.files.items.required, ['path'])
   assert.equal(schema.properties.files.items.additionalProperties, false)
 })
